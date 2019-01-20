@@ -7,7 +7,8 @@ import tensorflow as tf
 from math import pi
 
 import sys
-from ops import svgd_gradient, sqr_dist
+from ops import svgd_gradient, rbf_kernel
+from gmm_models import mixture_weights_and_grads
 
 class Layer():
 
@@ -20,9 +21,11 @@ class Layer():
         self.n_p, self.n_in, self.n_out = n_p, n_in, n_out
         self.activation_fn = activation_fn
         with tf.variable_scope(name) as scope:
+            w0 = (1.0 / np.sqrt(self.n_in + 1) * np.random.randn(self.n_p, self.n_in, self.n_out)).astype('float32')
             self.w = tf.get_variable('w',
                     shape=(self.n_p, self.n_in, self.n_out), dtype=tf.float32,
                     initializer = tf.glorot_uniform_initializer() )
+                    #initializer=w0, dtype=tf.float32)
 
             self.params = [self.w]
 
@@ -62,6 +65,7 @@ class SVGD():
         #self.v_noise_vars = [self.log_v_noise]
 
         self.step = tf.placeholder_with_default(1., shape=(), name='step')
+        #self.neg_log_var = tf.placeholder_with_default(0., shape=(), name='neg_log_var')
         self.n_neurons = [self.config.dim, self.config.n_hidden, self.config.n_hidden, 1]
         #self.n_neurons = [self.config.dim, self.config.n_hidden, 1]
 
@@ -85,25 +89,12 @@ class SVGD():
             if i != n_layers-1: cache.append(h) # last layer
             self.train_vars += self.nnet[i].params
         self.y_pred = tf.squeeze(h) # n_p x B
+
         #self.log_prob = tf.reduce_sum(self.get_log_liklihood(self.y, self.y_pred))
         self.log_lik, self.log_prior = self.get_log_liklihood(self.y, self.y_pred)
-        self.log_prob = tf.reduce_sum( (self.log_lik + self.log_prior) )
+        self.log_prob =  self.log_lik + self.log_prior  # []
         self.net_grads = tf.gradients(self.log_prob, self.train_vars)
 
-        #############################################################
-        ## kmeans parameters ##
-        with tf.variable_scope('kmeans') as scope:
-            self.gamma, self.mus = [], []
-            for i in range(n_layers):
-                gamma_i = tf.get_variable('gamma_%d'%i, shape=(self.config.n_particles, self.config.n_clusters), initializer=tf.zeros_initializer(), dtype=tf.float32)
-
-                #mus_i = tf.get_variable('mus_%d'%i, shape=[self.config.n_clusters]+list(self.train_vars[i].get_shape()[1:]), 
-                #            initializer=tf.glorot_uniform_initializer(), dtype=tf.float32)
-                #mus_i = tf.get_variable('mus_%d'%i, initializer=self.train_vars[i][:self.config.n_clusters], dtype=tf.float32)
-                mus_i = tf.get_variable('mus_%d'%i, shape=self.train_vars[i][:self.config.n_clusters].get_shape(), initializer=tf.zeros_initializer(), dtype=tf.float32)
-
-                self.gamma.append(gamma_i)
-                self.mus.append(mus_i)
         #############################################################
 
         # kfac parameters
@@ -114,25 +105,22 @@ class SVGD():
         self.G_inv = [tf.Variable(tf.zeros(p.get_shape()), trainable=False, dtype=tf.float32) for p in self.G]
         self.A_inv = [tf.Variable(tf.zeros(p.get_shape()), trainable=False, dtype=tf.float32) for p in self.A]
 
-        ## EAKFAC
-        #self.U_A = [tf.Variable(tf.zeros_like(p), trainable=False) for p in self.A]
-        #self.U_G = [tf.Variable(tf.zeros_like(p), trainable=False) for p in self.G]
-        #self.RA_S = [tf.Variable(tf.zeros_like(tf.transpose(p, [0,2,1])), trainable=False) for p in self.net_grads]
-
-        print(cache)
         #batch_size = tf.cast(tf.shape(self.X)[0], tf.float32)
         batch_size = tf.cast(tf.shape(self.X)[0], tf.float32) 
         self.A_, self.G_ = [], []
-        for p in cache[::1]:
+        for p in cache[::2]:
             self.A_.append( tf.matmul(p, p, transpose_a=True) / batch_size )
         #h_grads = tf.gradients(self.log_prob, cache[1::2])
-        h_grads = tf.gradients(tf.reduce_sum(self.log_lik / self.config.n_train), cache[1::2])
+        h_grads = tf.gradients(self.log_lik / self.config.n_train, cache[1::2])
         print(cache[1::2])
         for g in h_grads:
             self.G_.append( tf.matmul(g, g, transpose_a=True) / batch_size )
+        assert len(self.A_) == len(self.G_) 
+        #############################################################
+
 
         #############################################################
-        ## svgd ## 
+        # vanilla svgd 
         self.svgd_grads = []
         for p, g in zip(self.train_vars, self.net_grads):
             svgd_grad = svgd_gradient(p, g, kernel=self.config.kernel)
@@ -141,7 +129,7 @@ class SVGD():
         #############################################################
         # SVGD KFAC 
         self.inc_ops = self.inc_add_step()
-        self.inv_ops = self.mat_inv_step()
+        self.inv_ops = self.mat_inv_step(self.config.eps)
         #self.scaling_ops = self.ra_scaling_step(self.net_grads) # compute scalings
         #self.eig_ops = self.eig_bas_step() # eigen decomposition
         if self.config.method == 'svgd_kfac':
@@ -150,85 +138,79 @@ class SVGD():
         if self.config.method == 'map_kfac':
             self.map_kfac_grads = self.kfac_gradients(self.net_grads)
 
-        #############################################################
         if self.config.method == 'mixture_kfac':
             ## mixture KFAC
-            self.k_op, self.minIdx = self.kmeans_step()
-            self.mixture_kfac_grads = self.mixture_kfac_gradient()
-
-        tf.summary.scalar("log_prob", self.log_prob)
+            self.mixture_kfac_grads = self.mixture_kfac_gradient(self.net_grads)
 
 
-    def mixture_kfac_gradient(self,):
+        #############################################################
+        if self.config.method in ['SGLD', 'pSGLD']:
+            # for stability
+            self.acc = [tf.Variable(tf.ones(p.get_shape()), trainable=False, dtype=tf.float32) for p in self.train_vars]
+
+            mean_log_lik = self.log_lik / self.config.n_train
+            mean_log_lik_grads = tf.gradients(mean_log_lik, self.train_vars)
+            self.moment_op = self.moment_inc_step(mean_log_lik_grads)
+
+            M = [tf.sqrt(acc_new + 1e-6) for acc_new in self.acc]
+            
+            assert len(self.train_vars) == len(M)
+            self.psgld_grads = [ -self.config.learning_rate * (g - p/self.config.n_train) / m + \
+                        tf.sqrt(self.config.learning_rate / m) * 2. /self.config.n_train * tf.random_normal(p.get_shape())
+                         for p, g, m in zip(self.train_vars, mean_log_lik_grads, M)]
+
+        tf.summary.scalar("log_prob", tf.reduce_sum(self.log_prob))
+
+
+    def mixture_kfac_gradient(self, in_grads):
+
+        # for the \ell-th cluster
+        def _weighted_svgd(x, d_log_pw, w):
+            kxy, dxkxy = rbf_kernel(x, to3d=True)
+            velocity = tf.reduce_sum(tf.expand_dims(tf.expand_dims(w, 0), 2) * tf.expand_dims(kxy, 2) * tf.expand_dims(d_log_pw, 0), axis=1) + \
+                        tf.reduce_sum(tf.expand_dims(tf.expand_dims(w, 1), 2) * dxkxy, axis=0)
+            # n * d , d x d
+            return velocity
+
+
+        def _mixture_svgd_grads(x, x_shape, d_log_p, mix, mix_grads, g_inv, a_inv):
+            velocity = 0
+            for i in range(self.config.n_particles):
+                w_i_svgd = _weighted_svgd(x, d_log_p + mix_grads[i], mix[i])
+                w_i_svgd = tf.reshape(w_i_svgd, x_shape)
+
+                # H_\ell
+                g = tf.tile(tf.expand_dims(g_inv[i], 0), [self.config.n_particles, 1, 1])
+                a = tf.tile(tf.expand_dims(a_inv[i], 0), [self.config.n_particles, 1, 1])
+                delta = tf.matmul(tf.matmul(g, w_i_svgd, transpose_b=True), a)
+                velocity += tf.expand_dims(tf.expand_dims(mix[i], 1), 2) * delta
+
+            return tf.transpose(velocity, [0,2,1])
+
 
         out_grads = []
-        for x, grad, minIdx, G_inv, A_inv in zip(self.train_vars, self.net_grads, self.minIdx, self.G_inv, self.A_inv):
-            partitioned_particles = tf.dynamic_partition(data=x, partitions=minIdx, num_partitions=self.config.n_clusters)
-            partitioned_gradients = tf.dynamic_partition(data=grad, partitions=minIdx, num_partitions=self.config.n_clusters)
+        for k in range(len(self.train_vars)):
+            x_k = self.train_vars[k]
+            x_k_shape = tf.shape(x_k)
+            x_k_flat = tf.reshape(x_k, [self.config.n_particles, -1])
+            x_k_grad = tf.reshape(in_grads[k], [self.config.n_particles, -1])
+            mix_k, mix_grads_k = mixture_weights_and_grads(x_k_flat)  # c * n, c * n * d
 
-            partitioned_G_inv = tf.dynamic_partition(data=G_inv, partitions=minIdx, num_partitions=self.config.n_clusters)
-            partitioned_A_inv = tf.dynamic_partition(data=A_inv, partitions=minIdx, num_partitions=self.config.n_clusters)
-
-            partitioned_indices = tf.dynamic_partition(
-                      data=tf.cast(tf.range(tf.shape(x)[0]), tf.int32),
-                      partitions=minIdx,
-                      num_partitions=self.config.n_clusters)
-
-            mixture_grads = [] #[None for _ in range(self.config.n_clusters)]
-            for sp, sg, pg, pa in zip(partitioned_particles, partitioned_gradients, partitioned_G_inv, partitioned_A_inv):
-                g = tf.tile(tf.reduce_mean(pg, 0, keep_dims=True), [tf.shape(sp)[0], 1, 1])
-                a = tf.tile(tf.reduce_mean(pa, 0, keep_dims=True), [tf.shape(sp)[0], 1, 1])
-                ss = tf.cond(
-                    tf.less_equal(tf.shape(sp)[0], 1),
-                    lambda: tf.matmul(tf.matmul(pg, -sg, transpose_b=True), pa),
-                    lambda: tf.matmul(tf.matmul(g, -svgd_gradient(sp, sg, kernel=self.config.kernel), transpose_b=True), a)
-                )
-                mixture_grads.append(tf.transpose(ss, [0,2,1]))
-            ret = tf.dynamic_stitch(partitioned_indices, mixture_grads)
-            ret.set_shape(x.get_shape())
-            out_grads.append(ret)
+            g_inv_k = self.G_inv[k]
+            a_inv_k = self.A_inv[k]
+            vel_k = _mixture_svgd_grads(x_k_flat, x_k_shape, x_k_grad, mix_k, mix_grads_k, g_inv_k, a_inv_k)
+            out_grads.append( -vel_k )
 
         return out_grads
 
 
-    def kmeans_initilization(self):
-        ops = []
-        gamma0 = tf.one_hot(
-                    tf.constant(np.random.randint(0, self.config.n_clusters, size=(self.config.n_particles,)).astype('int32')),
-                    self.config.n_clusters
-        )
-        for x_i, mu_i, i in zip(self.train_vars, self.mus, range(self.config.n_clusters)):
-            mu_shape = tf.shape(mu_i)
-            x_i = tf.reshape(x_i, (tf.shape(x_i)[0], -1))
-            mu_i = tf.reshape(mu_i, (tf.shape(mu_i)[0], -1))
 
-            sum_gamma = tf.reduce_sum(gamma0, 0) + 1e-5
-            mus = tf.reduce_sum(tf.expand_dims(gamma0, -1) * tf.expand_dims(x_i, 1), 0) / tf.expand_dims(sum_gamma, -1)
-
-            ops.append( tf.assign(self.gamma[i], gamma0) )
-            ops.append( tf.assign(self.mus[i], tf.reshape(mus, mu_shape)) )
-        return tf.group(*ops)
-
-
-    def kmeans_step(self, ):
-        #for each data point, find its nearest neighbors
-        ops, minIdx = [], []
-        for x_i, mu_i, i in zip(self.train_vars, self.mus, range(self.config.n_clusters)):
-            mu_shape = tf.shape(mu_i)
-            x_i = tf.reshape(x_i, (tf.shape(x_i)[0], -1))
-            mu_i = tf.reshape(mu_i, (tf.shape(mu_i)[0], -1))
-
-            H_i = sqr_dist(x_i, mu_i)
-            minIdx_i = tf.argmin(H_i, axis=1)
-            gamma_i = tf.one_hot(minIdx_i, self.config.n_clusters, dtype=tf.float32)
-
-            sum_gamma = tf.reduce_sum(gamma_i, 0) + 1e-5
-            mus = tf.reduce_sum(tf.expand_dims(gamma_i, -1) * tf.expand_dims(x_i, 1), 0) / tf.expand_dims(sum_gamma, -1)
-
-            ops.append( tf.assign(self.gamma[i], gamma_i) )
-            ops.append( tf.assign(self.mus[i], tf.reshape(mus, mu_shape)) )
-            minIdx.append( tf.cast(minIdx_i, tf.int32) )
-        return tf.group(*ops), minIdx
+    def moment_inc_step(self, in_grads, rho=0.95):
+        assert len(self.acc) == len(in_grads)
+        assign_ops = []
+        for k in range(len(self.acc)):
+            assign_ops.append(tf.assign(self.acc[k], rho*self.acc[k]+ (1.-rho)*in_grads[k]**2))
+        return tf.group(*assign_ops)
 
 
     def inc_add_step(self,):
@@ -240,7 +222,7 @@ class SVGD():
         return tf.group(*assign_ops)
 
 
-    def mat_inv_step(self, eps=3e-3):
+    def mat_inv_step(self, eps=5e-3):
         assign_ops = []
         for k in range(len(self.A_inv)):
             #print(self.A_inv[k].get_shape(), self.G_inv[k].get_shape())
@@ -297,7 +279,7 @@ class SVGD():
 
     def get_log_liklihood(self, y_true, y_pred):
         #v_noise = tf.exp(self.log_v_noise)
-        log_v_noise, v_noise = 0., 1.
+        log_v_noise, v_noise = np.log(0.5), 0.5
         # location = 0, scale = 1
         log_lik_data = -self.config.n_train * 0.5 * tf.log(2.*np.pi) * log_v_noise \
                        -self.config.n_train * 0.5 * tf.reduce_mean((y_pred - tf.expand_dims(y_true, 0))**2 / v_noise, axis=1)
@@ -329,5 +311,37 @@ class SVGD():
         if step is not None:
             fd[self.step] = step
         return fd
+
+
+    #def mixture_kfac_gradient(self,):
+
+    #    out_grads = []
+    #    for x, grad, minIdx, G_inv, A_inv in zip(self.train_vars, self.net_grads, self.minIdx, self.G_inv, self.A_inv):
+    #        partitioned_particles = tf.dynamic_partition(data=x, partitions=minIdx, num_partitions=self.config.n_clusters)
+    #        partitioned_gradients = tf.dynamic_partition(data=grad, partitions=minIdx, num_partitions=self.config.n_clusters)
+
+    #        partitioned_G_inv = tf.dynamic_partition(data=G_inv, partitions=minIdx, num_partitions=self.config.n_clusters)
+    #        partitioned_A_inv = tf.dynamic_partition(data=A_inv, partitions=minIdx, num_partitions=self.config.n_clusters)
+
+    #        partitioned_indices = tf.dynamic_partition(
+    #                  data=tf.cast(tf.range(tf.shape(x)[0]), tf.int32),
+    #                  partitions=minIdx,
+    #                  num_partitions=self.config.n_clusters)
+
+    #        mixture_grads = [] #[None for _ in range(self.config.n_clusters)]
+    #        for sp, sg, pg, pa in zip(partitioned_particles, partitioned_gradients, partitioned_G_inv, partitioned_A_inv):
+    #            g = tf.tile(tf.reduce_mean(pg, 0, keep_dims=True), [tf.shape(sp)[0], 1, 1])
+    #            a = tf.tile(tf.reduce_mean(pa, 0, keep_dims=True), [tf.shape(sp)[0], 1, 1])
+    #            ss = tf.cond(
+    #                tf.less_equal(tf.shape(sp)[0], 1),
+    #                lambda: tf.matmul(tf.matmul(pg, -sg, transpose_b=True), pa),
+    #                lambda: tf.matmul(tf.matmul(g, -svgd_gradient(sp, sg, kernel=self.config.kernel), transpose_b=True), a)
+    #            )
+    #            mixture_grads.append(tf.transpose(ss, [0,2,1]))
+    #        ret = tf.dynamic_stitch(partitioned_indices, mixture_grads)
+    #        ret.set_shape(x.get_shape())
+    #        out_grads.append(ret)
+
+    #    return out_grads
 
 

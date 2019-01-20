@@ -15,7 +15,7 @@ import numpy as np
 from math import pi
 import pprint
 
-base_dir = '/home/dilin/Dropbox/code/adaptive_f_divergence/renyi/VRbound/BayesianNN/data/'
+base_dir = './data/'
 
 def load_uci_dataset(dataset, i):
     # We load the data
@@ -35,6 +35,10 @@ def load_uci_dataset(dataset, i):
     y_train = y[ index_train.tolist() ]
     X_test = X[ index_test.tolist(), ]
     y_test = y[ index_test.tolist() ]
+
+    ### add the bias
+    #X_train = np.concatenate((X_train, np.ones((len(X_train), 1))), axis=1)
+    #X_test = np.concatenate((X_test, np.ones((len(X_test), 1))), axis=1)
 
     # We normalize the features
     std_X_train = np.std(X_train, 0)

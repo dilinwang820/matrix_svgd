@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 def sqr_dist(x, y, e=1e-8):
 
-    assert len(list(x.get_shape())) == 2 and len(list(y.get_shape()))==2, 'illegal inputs'
+    #assert len(list(x.get_shape())) == 2 and len(list(y.get_shape()))==2, 'illegal inputs'
     xx = tf.reduce_sum(tf.square(x) + 1e-10, axis=1)
     yy = tf.reduce_sum(tf.square(y) + 1e-10, axis=1)
     xy = tf.matmul(x, y, transpose_b=True)
@@ -30,7 +30,7 @@ def median_distance(H):
         lambda: top_k[-1]
     )
     #return tf.maximum(h, 1e-6)
-    return h / (1. + tf.log(tf.cast(tf.shape(H)[0], tf.float32) + 1.))
+    return h / tf.log(tf.cast(tf.shape(H)[0], tf.float32) + 1.)
 
 
 def poly_kernel(x, subtract_mean=True, e=1e-8):
@@ -41,7 +41,7 @@ def poly_kernel(x, subtract_mean=True, e=1e-8):
     return kxy, dxkxy
 
 
-def rbf_kernel(x, h=-1):
+def rbf_kernel(x, h=-1, to3d=False):
 
     H = sqr_dist(x, x)
     if h == -1:
@@ -52,6 +52,7 @@ def rbf_kernel(x, h=-1):
     sumkxy = tf.reduce_sum(kxy, axis=1, keep_dims=True)
     dxkxy = (dxkxy + x * sumkxy) * 2. / h
 
+    if to3d: dxkxy = -(tf.expand_dims(x, 1) - tf.expand_dims(x, 0)) * tf.expand_dims(kxy, 2) * 2. / h
     return kxy, dxkxy
 
 
@@ -103,19 +104,21 @@ def svgd_gradient(x, grad, kernel='rbf', temperature=1., u_kernel=None, **kernel
         x = tf.reshape(x, (tf.shape(x)[0], -1))
         grad = tf.reshape(grad, (tf.shape(grad)[0], -1))
 
-    if kernel == 'rbf':
-        kxy, dxkxy = rbf_kernel(x, **kernel_params)
-    elif kernel == 'poly':
-        kxy, dxkxy = poly_kernel(x)
-    elif kernel == 'js':
+    if u_kernel is not None:
         kxy, dxkxy = u_kernel['kxy'], u_kernel['dxkxy']
-    elif kernel == 'imq':
-        kxy, dxkxy = imq_kernel(x)
-    elif kernel == 'none':
-        kxy = tf.eye(tf.shape(x)[0])
-        dxkxy = tf.zeros_like(x)
+        dxkxy = tf.reshape(dxkxy, tf.shape(x))
     else:
-        raise NotImplementedError
+        if kernel == 'rbf':
+            kxy, dxkxy = rbf_kernel(x, **kernel_params)
+        elif kernel == 'poly':
+            kxy, dxkxy = poly_kernel(x)
+        elif kernel == 'imq':
+            kxy, dxkxy = imq_kernel(x)
+        elif kernel == 'none':
+            kxy = tf.eye(tf.shape(x)[0])
+            dxkxy = tf.zeros_like(x)
+        else:
+            raise NotImplementedError
 
     svgd_grad = (tf.matmul(kxy, grad) + temperature * dxkxy) / tf.reduce_sum(kxy, axis=1, keep_dims=True)
 

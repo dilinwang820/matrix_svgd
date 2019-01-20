@@ -19,6 +19,9 @@ from load_data import load_uci_dataset
 
 #import pdb
 
+'''
+    Augmented Lagrangian: for stable training
+'''
 class Trainer(object):
 
     def optimize_sgd(self, train_vars, loss=None, train_grads=None, lr=1e-2):
@@ -30,7 +33,7 @@ class Trainer(object):
         return train_op
 
     def optimize_adagrad(self, train_vars, loss=None, train_grads=None, lr=1e-2):
-        optimizer = tf.train.RMSPropOptimizer(learning_rate=lr, decay=0.9)  #adagrad with momentum
+        optimizer = tf.train.RMSPropOptimizer(learning_rate=lr, decay=0.95)  #adagrad with momentum
         if train_grads is not None:
             train_op = optimizer.apply_gradients(zip(train_grads, train_vars))
         else:
@@ -81,14 +84,15 @@ class Trainer(object):
 
         self.learning_rate = config.learning_rate
         if config.lr_weight_decay:
+            decay_step = int(0.1 * self.config.n_epoches * self.config.n_train // self.config.batch_size) 
             self.learning_rate = tf.train.exponential_decay(
                 self.learning_rate,
                 global_step=self.global_step,
-                decay_steps=10000,
-                decay_rate=0.5,
+                decay_steps=decay_step,
+                decay_rate=0.8,
                 staircase=True,
                 name='decaying_learning_rate'
-        )
+            )
 
         self.summary_op = tf.summary.merge_all()
         self.saver = tf.train.Saver(max_to_keep=1)
@@ -98,7 +102,6 @@ class Trainer(object):
         #self.train_op = self.optimize_adam( self.model.kl_loss, lr=self.learning_rate)
         if self.config.method == 'svgd':
             self.train_op = self.optimize_adagrad( self.model.train_vars, train_grads=self.model.svgd_grads, lr=self.learning_rate)
-            #self.v_noise_op = self.optimize_adagrad(self.model.v_noise_vars, loss=-self.model.log_prob/self.config.n_particles, lr=self.learning_rate)
         elif self.config.method in ['svgd_kfac', 'map_kfac', 'mixture_kfac']:
             self.inc_op = self.model.inc_ops
             self.inv_op = self.model.inv_ops
@@ -108,6 +111,8 @@ class Trainer(object):
                 self.train_op = self.optimize_adagrad( self.model.train_vars, train_grads=self.model.map_kfac_grads, lr=self.learning_rate)
             elif self.config.method == 'mixture_kfac':
                 self.train_op = self.optimize_adagrad( self.model.train_vars, train_grads=self.model.mixture_kfac_grads, lr=self.learning_rate)
+        elif self.config.method in ['SGLD', 'pSGLD']:
+                self.train_op = self.optimize_sgd( self.model.train_vars, train_grads=self.model.psgld_grads, lr=1.0)
 
         tf.global_variables_initializer().run()
         if config.checkpoint is not None:
@@ -133,19 +138,15 @@ class Trainer(object):
         pred_y_dev = pred_y_dev * self.dataset.std_y_train + self.dataset.mean_y_train
         y_dev = dev_set['y'] * self.dataset.std_y_train + self.dataset.mean_y_train
         neg_log_var = -np.log(np.mean((pred_y_dev - y_dev) ** 2))
-        #log_v_noise = self.session.run(self.model.log_v_noise)
-        #print(np.exp(log_v_noise))
-        #v_scale = np.exp(log_v_noise) * self.dataset.std_y_train ** 2
 
         y_test = test_set['y']
         pred_y_test = self.session.run(self.model.y_pred, self.model.get_feed_dict(test_set))
         pred_y_test = pred_y_test * self.dataset.std_y_train + self.dataset.mean_y_train
         prob = np.sqrt(np.exp(neg_log_var) / (2*np.pi)) * np.exp( -0.5*(pred_y_test - np.expand_dims(y_test, 0))**2 * np.exp(neg_log_var) )
-        #prob = np.sqrt(1. / (2*np.pi*v_scale)) * np.exp( -0.5*(pred_y_test - np.expand_dims(y_test, 0))**2 / v_scale )
 
         rmse = np.sqrt(np.mean((y_test - np.mean(pred_y_test, 0))**2))
         ll = np.mean( np.log(np.mean(prob, axis=0)) )
-        return rmse, ll
+        return rmse, ll, neg_log_var
 
 
     def train(self):
@@ -155,13 +156,13 @@ class Trainer(object):
         self.session.run(self.global_step.assign(0)) # reset global step
         n_updates = 1
 
-        if self.config.method == 'mixture_kfac':
-            self.session.run(self.model.kmeans_initilization())
-
+        x_train, y_train = self.dataset.x_train, self.dataset.y_train
         for ep in xrange(1, 1+self.config.n_epoches):
-            x_train, y_train = shuffle(self.dataset.x_train, self.dataset.y_train)
+            x_train, y_train = shuffle(x_train, y_train)
+            #x_train, y_train = self.dataset.x_train, self.dataset.y_train
             max_batches = self.config.n_train // self.config.batch_size 
-            if self.config.n_train % self.config.batch_size != 0: max_batches += 1
+
+            #if self.config.n_train % self.config.batch_size != 0: max_batches += 1
             for bi in xrange(max_batches):
                 start = bi * self.config.batch_size
                 end = min((bi+1) * self.config.batch_size, self.config.n_train)
@@ -170,38 +171,45 @@ class Trainer(object):
                     'X': x_train[start:end],
                     'y': y_train[start:end]
                 }
-                #kfac_grads = \
-                #        self.session.run(self.model.kfac_grads, feed_dict=self.model.get_feed_dict(batch_chunk, n_updates))
-                #print(len(kfac_grads))
-                ##for g in kfac_grads:
-                #    f = np.isnan(g).any()
-                #    print(n_updates, f)
-                #    if f: sys.exit(0)
 
                 step, summary, log_prob, step_time = \
                         self.run_single_step(n_updates, batch_chunk)
-                
+
                 if np.any(np.isnan(log_prob)): sys.exit(1)
 
                 self.summary_writer.add_summary(summary, global_step=step)
-                if n_updates % 50 == 0:
-                    self.log_step_message(step, log_prob, step_time)
+                #if n_updates % 500 == 0:
+                #    self.log_step_message(n_updates, log_prob, step_time)
+                
+                #if n_updates % 50 == 0:
+                #    rmse, ll, _ = self.evaluate()
+                #    print(n_updates, rmse, ll)
+
                 n_updates+= 1
 
-            if ep % 10 == 0:
-                rmse, ll = self.evaluate()
-                print(ep, rmse, ll)
+            if ep % (self.config.n_epoches//10 + 1) == 0:
+                rmse, ll, neg_log_var = self.evaluate()
+                print(ep, neg_log_var, rmse, ll)
 
-        test_rmse, test_ll = self.evaluate()
+        test_rmse, test_ll, _ = self.evaluate()
         write_time = time.strftime("%m-%d-%H:%M:%S")
-        with open(self.config.savepath + self.config.dataset + "_test_ll_rmse_%s.txt" % (self.filepath), 'a') as f:
+        
+        pardir = "%s_%s/" % (self.config.method, repr(self.config.learning_rate))
+        if not os.path.exists(self.config.savepath + pardir):
+            os.makedirs(self.config.savepath + pardir)
+        
+        if self.config.trial  == 1:
+            fm = 'w'
+        else:
+            fm = 'a'
+        with open(self.config.savepath + pardir + self.config.dataset + "_test_ll_rmse_%s.txt" % (self.filepath), fm) as f:
             f.write(repr(self.config.trial) + ',' + write_time + ',' + repr(self.config.n_epoches) + ',' + repr(test_rmse) + ',' + repr(test_ll) + '\n')
-
-        if self.config.save:
-            # save model at the end
-            self.saver.save(self.session,
-                os.path.join(self.train_dir, 'model'),
-                global_step=step)
+        
+        #if self.config.save:
+        #    # save model at the end
+        #    self.saver.save(self.session,
+        #        os.path.join(self.train_dir, 'model'),
+        #        global_step=step)
 
 
     def run_single_step(self, step, batch_chunk):
@@ -211,8 +219,10 @@ class Trainer(object):
             fetch += [self.inc_op]
             if step % self.config.inverse_update_freq == 0:
                 fetch += [self.inv_op]
-            if self.config.method == 'mixture_kfac':
-                fetch += [self.model.k_op]
+
+        if self.config.method == 'pSGLD':
+            fetch += [self.model.moment_op]
+
         fetch += [self.train_op]
 
         fetch_values = self.session.run(
@@ -221,7 +231,7 @@ class Trainer(object):
 
         [step, summary, log_prob] = fetch_values[:3]
         _end_time = time.time()
-        return step, summary, log_prob, (_end_time - _start_time)
+        return step, summary, np.sum(log_prob), (_end_time - _start_time)
 
 
     def log_step_message(self, step, log_prob, step_time, is_train=True):
@@ -242,26 +252,33 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--n_epoches', type=int, default=100, required=False)
-    parser.add_argument('--method', type=str, default='svgd', choices=['svgd', 'map_kfac', 'svgd_kfac', 'mixture_kfac'], required=True)
+    parser.add_argument('--method', type=str, default='svgd', choices=['SGLD', 'pSGLD', 'svgd', 'map_kfac', 'svgd_kfac', 'mixture_kfac'], required=True)
     parser.add_argument('--dataset', type=str, default='boston', required=True)
-    parser.add_argument('--n_particles', type=int, default=20, required=False)
-    parser.add_argument('--n_clusters', type=int, default=3, required=False)
-    parser.add_argument('--batch_size', type=int, default=128, required=False)
+    parser.add_argument('--n_particles', type=int, default=10, required=False)
+    parser.add_argument('--batch_size', type=int, default=100, required=False)
     parser.add_argument('--n_hidden', type=int, default=50, required=False)
+    parser.add_argument('--eps', type=float, default=5e-3, required=False)
     parser.add_argument('--inverse_update_freq', type=int, default=20, required=False)
     parser.add_argument('--trial', type=int, default=1, required=False)
     parser.add_argument('--learning_rate', type=float, default=5e-3, required=False)
     parser.add_argument('--kernel', type=str, default='rbf', required=False)
-    parser.add_argument('--lr_weight_decay', action='store_true', default=False)
     parser.add_argument('--clean', action='store_true', default=False)
     parser.add_argument('--savepath', type=str, default='results/', required=False)
     parser.add_argument('--checkpoint', type=str, default=None, required=False)
     parser.add_argument('--save', action='store_true', default=False)
-    parser.add_argument('--gpu', type=int, default=1)
+    parser.add_argument('--lr_weight_decay', action='store_true', default=False)
+    parser.add_argument('--gpu', type=int, default=0)
     config = parser.parse_args()
     
     if not config.save:
         log.warning("nothing will be saved.")
+    
+    if config.dataset == 'year':
+        config.batch_size = 1000
+    
+    if config.dataset in ['wine', 'boston']:
+        config.inverse_update_freq = 5
+        config.eps = 5e-2
 
     session_config = tf.ConfigProto(
 
@@ -273,6 +290,9 @@ def main():
     )
     with tf.Graph().as_default(), tf.Session(config=session_config) as sess:
         with tf.device('/gpu:%d'% config.gpu):
+            tf.set_random_seed(123)
+            np.random.seed(123)
+
             from collections import namedtuple
             dataStruct = namedtuple("dataStruct", "x_train x_test y_train, y_test, mean_y_train, std_y_train")
 
