@@ -7,6 +7,7 @@ if [ "$#" -ne 2 ];then
     exit 1
 fi
 
+# e.g.,
 # SGLD, lr = 0.1
 # pSGLD, lr = 0.001
 # svgd, lr = 0.005
