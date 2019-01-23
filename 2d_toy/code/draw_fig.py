@@ -15,7 +15,7 @@ lineWidth = 7.0
 label_name = ['Vanilla SVGD', 'Matrix SVGD(average)', 'Matrix SVGD(mixture)', 'SVN']
 
 def make_video(env, filename, kernel_type, seed = 0):
-	Iteration = [0,5,10,30,100,300]
+	Iteration = range(0,300,10)#[0,5,10,30,100,300]
 	ngrid = 350
 	# set the line space carefully to the region of your figure
 	x = np.linspace(-3.3, 3.7, ngrid)
@@ -32,5 +32,7 @@ def make_video(env, filename, kernel_type, seed = 0):
 		plt.scatter(x[seed,iteration,:,1], x[seed,iteration,:,0], color = '#FF0000', marker = 'X', s = 300, alpha = 1.)
 		plt.subplots_adjust(left = 0.05, right = 0.95, bottom = 0.0, top = 0.9)
 		plt.title(kernel_type + '_iter = {}'.format(iteration))
-		plt.show()
+		# plt.show()
+		plt.draw()
+		plt.pause(0.1)
 		plt.clf()
