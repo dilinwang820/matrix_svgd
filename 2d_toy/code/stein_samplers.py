@@ -1,7 +1,6 @@
 import numpy as np
 from scipy.linalg import sqrtm
 from kernel import gaussian_kernel, rbf_kernel
-from scipy.stats import ortho_group
 
 # H: n*d*d
 def SVN(x, Dlogp, H):

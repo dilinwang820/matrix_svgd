@@ -1,6 +1,5 @@
 import numpy as np
 from scipy.stats import multivariate_normal
-from scipy.stats import ortho_group
 
 class double_banana(object):
 	dimension = 2
