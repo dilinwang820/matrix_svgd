@@ -76,6 +76,7 @@ if __name__ == '__main__':
 		newton: SVN 
 	"""
 	kernel_type = ['rbf', 'gaussian', 'mixture', 'newton']
+	method_name = ['Vanilla SVGD', 'Matrix SVGD(average)', 'Matrix SVGD(mixture)', 'SVN']
 	n_methods = 4
 
 	n_particles = 50
@@ -92,4 +93,4 @@ if __name__ == '__main__':
 		np.save('../data/'+env_name+'_'+kernel_type[j]+'.npy', EVOLVEXS)
 
 	for j in range(n_methods):
-		make_video(env, '../data/'+env_name+'_'+kernel_type[j]+'.npy', kernel_type[j], seed = 0)
+		make_video(env, '../data/'+env_name+'_'+kernel_type[j]+'.npy', kernel_type[j], method_name[j], seed = 0)
