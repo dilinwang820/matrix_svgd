@@ -68,7 +68,13 @@ if __name__ == '__main__':
 		env = sine(1., 0.003)									# unimodal sine shape example
 	elif env_name == 'double_banana':
 		env = double_banana(0.0, 100.0, 1.0, 0.09, np.log(30))	# bimodal double banana example
-
+	
+	"""
+		rbf: vanilla svgd
+		gaussian: matrix svgd (avearge)
+		mixture: matrix svgd (mixture)
+		newton: SVN 
+	"""
 	kernel_type = ['rbf', 'gaussian', 'mixture', 'newton']
 	n_methods = 4
 
