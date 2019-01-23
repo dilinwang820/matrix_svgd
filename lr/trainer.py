@@ -19,9 +19,6 @@ from load_data import load_uci_dataset
 
 #import pdb
 
-'''
-    Augmented Lagrangian: for stable training
-'''
 class Trainer(object):
 
     def optimize_sgd(self, train_vars, loss=None, train_grads=None, lr=1e-2):

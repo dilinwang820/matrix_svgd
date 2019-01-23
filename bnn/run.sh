@@ -1,25 +1,30 @@
 #! /bin/bash
 
-#set -e 
+set -e 
 
 if [ "$#" -ne 2 ];then
     echo "Usage run.sh [svgd|map_kfac|svgd_kfac|mixture_kfac|sgld|psgld] lr"
     exit 1
 fi
 
+# SGLD, lr = 0.1
+# pSGLD, lr = 0.001
+# svgd, lr = 0.005
+# svgd_kfac, lr = 0.005 
+# mixture_kfac, lr = 0.001
+
 method=$1
 learning_rate=$2
 
 ###
 ##  for small datasets, 
-##  SVGD_KFAC, Mixture_KFAC prefer small training epochs 
+##  run SVGD_KFAC, Mixture_KFAC with small training epochs 
 ##  boston=200, wine=50, otherwise, default settings work well
-##  learning_rate: 0.005 for svgd, 0.001 for svgd_kfac and mixture_kfac seems work well
+##  e.g., protein=50, boston=500, naval=200, kin8nm=200, combined=500, energy=1000, year=10, concrete=500
+##  learning_rate: 0.005 for svgd, 0.005 / 0.001 for svgd_kfac and mixture_kfac seems work well
 ###
 
-# protein=50, boston=500, naval=200, kin8nm=200, combined=500, energy=1000, year=10, concrete=500
-#declare -A datasets=( [boston]=1000 [concrete]=1000 [energy]=1000 [kin8nm]=200 [naval]=200 [combined]=500 [wine]=1000 [protein]=50 [year]=10 )
-declare -A epochs=( [boston]=20 [concrete]=20 [energy]=20 [kin8nm]=20 [naval]=20 [combined]=20 [wine]=20 [protein]=5 [year]=5 )
+declare -A epochs=( [protein]=5 )
 declare -A datasets=( [protein]=50 )
 
 for ds in "${!datasets[@]}"

@@ -398,7 +398,7 @@ if __name__ == '__main__':
     logger.addHandler(fh)
 
     logger.info('loading data...')
-    x = cPickle.load(open("./benchmark/%s.p" % config.dataset,"rb"))
+    x = cPickle.load(open("./data/%s.p" % config.dataset,"rb"))
 
     if config.dataset == 'trec':
         train_x, test_x, train_y, test_y, W, word_idx_map, vocab = x[0], x[1], x[2], x[3], x[4], x[5], x[6]
